@@ -177,6 +177,7 @@ import { isMarkdownFileLinkLabel } from "@t3tools/shared/markdownLinks";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import { useAssetUrlRefresh, useAssetUrlState } from "../assets/assetUrls";
+import { openFileInNewTab } from "../browser/openFileInNewTab";
 import { cn } from "../lib/utils";
 import { useRemoteOpenResolution, type RemoteOpenMode } from "../remoteOpen";
 import { useRightPanelStore } from "../rightPanelStore";
@@ -1212,6 +1213,7 @@ interface MarkdownFileLinkProps {
   onOpenInPanel: (panelPath: string, line: number | undefined) => void;
   openInEditorMenuLabel: string;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+  onOpenInNewTab?: (() => Promise<void>) | undefined;
   onOpenMedia?: (() => void) | undefined;
   onReveal?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   /** Platform-specific menu label ("Reveal in Finder", ...); required for the
@@ -1961,6 +1963,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   onOpenInPanel,
   openInEditorMenuLabel,
   onOpenInBrowser,
+  onOpenInNewTab,
   onOpenMedia,
   onReveal,
   revealLabel,
@@ -2053,6 +2056,19 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     })();
   }, [onOpenInBrowser, targetPath]);
 
+  const handleOpenInNewTab = useCallback(() => {
+    void onOpenInNewTab?.().catch((cause: unknown) => {
+      reportMarkdownActionFailure({ operation: "open-file-in-new-tab", target: targetPath }, cause);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Unable to open file in a new tab",
+          description: cause instanceof Error ? cause.message : "An error occurred.",
+        }),
+      );
+    });
+  }, [onOpenInNewTab, targetPath]);
+
   const handleRevealInFileManager = useCallback(() => {
     if (!onReveal) {
       return;
@@ -2143,6 +2159,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
             ...(onOpenInBrowser
               ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
               : []),
+            ...(onOpenInNewTab
+              ? ([{ id: "open-in-new-tab", label: "Open in new tab" }] as const)
+              : []),
             ...(onReveal && revealLabel ? ([{ id: "reveal", label: revealLabel }] as const) : []),
             { id: "copy-relative", label: "Copy relative path" },
             { id: "copy-full", label: "Copy full path" },
@@ -2160,6 +2179,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         }
         if (clicked === "open-in-browser") {
           handleOpenInBrowser();
+          return;
+        }
+        if (clicked === "open-in-new-tab") {
+          handleOpenInNewTab();
           return;
         }
         if (clicked === "reveal") {
@@ -2184,9 +2207,11 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       displayPath,
       handleCopy,
       handleOpenInBrowser,
+      handleOpenInNewTab,
       handleOpenInEditor,
       handleRevealInFileManager,
       onOpenInBrowser,
+      onOpenInNewTab,
       onOpenMedia,
       onOpen,
       onReveal,
@@ -2312,6 +2337,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.onOpenInPanel === next.onOpenInPanel &&
     previous.openInEditorMenuLabel === next.openInEditorMenuLabel &&
     previous.onOpenInBrowser === next.onOpenInBrowser &&
+    previous.onOpenInNewTab === next.onOpenInNewTab &&
     previous.onOpenMedia === next.onOpenMedia &&
     previous.onReveal === next.onReveal &&
     previous.revealLabel === next.revealLabel
@@ -2360,6 +2386,7 @@ function useChatMarkdownState({
   const environmentId = threadRef?.environmentId ?? explicitEnvironmentId ?? null;
   const canOperateHost = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const canOperatePreview = useEnvironmentScope(environmentId, AuthPreviewOperateScope);
+  const canReadFiles = useEnvironmentScope(environmentId, AuthFilesystemReadScope);
   const remoteOpen = useRemoteOpenResolution(environmentId);
   const canUseShellActions =
     canOperateHost &&
@@ -2598,6 +2625,21 @@ function useChatMarkdownState({
     },
     [canOperatePreview, createAssetUrl, cwd, openPreview, preparedConnection, threadRef],
   );
+  const openMarkdownFileInNewTab = useCallback(
+    (path: string) => {
+      if (!threadRef || preparedConnection._tag === "None") {
+        return Promise.reject(new Error("Environment is not connected."));
+      }
+      return openFileInNewTab({
+        threadRef,
+        filePath: path,
+        workspaceRoot: cwd,
+        httpBaseUrl: preparedConnection.value.httpBaseUrl,
+        createAssetUrl,
+      });
+    },
+    [createAssetUrl, cwd, preparedConnection, threadRef],
+  );
   const findWorkspaceBasenameMatch = useCallback(
     async (workspaceRelativePath: string) => {
       if (
@@ -2711,19 +2753,31 @@ function useChatMarkdownState({
               ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
               : undefined
           }
+          onOpenInNewTab={
+            !isElectron &&
+            threadRef &&
+            canReadFiles &&
+            preparedConnection._tag === "Some" &&
+            isBrowserPreviewFile(fileLinkMeta.filePath)
+              ? () => openMarkdownFileInNewTab(fileLinkMeta.filePath)
+              : undefined
+          }
         />
       );
     },
     [
       canUseShellActions,
       canOperatePreview,
+      canReadFiles,
       environmentId,
       fileLinkParentSuffixByPath,
       openFileInPanel,
       openInPreferredEditor,
       openMarkdownFileInPreview,
+      openMarkdownFileInNewTab,
       openMarkdownMedia,
       preferredEditorMenuLabel,
+      preparedConnection,
       resolvedTheme,
       revealInFileManagerLabel,
       revealMarkdownFileInFileManager,
